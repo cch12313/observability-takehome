@@ -1,0 +1,49 @@
+# Observability take-home — starter environment.
+#
+# This starter deliberately contains NO observability stack. Adding metrics,
+# distributed tracing, an OpenTelemetry Collector, a dashboard and an alert is
+# the assignment. You are expected to extend this compose file.
+#
+#   docker compose up --build          # start the two services
+#   docker compose --profile loadgen up loadgen   # start traffic (separate step)
+
+services:
+  inventory-service:
+    build: ./inventory-service
+    ports:
+      - "8001:8001"
+    environment:
+      INVENTORY_BASE_LATENCY_MS: "15"
+      # Fault scenario is OFF by default. Trigger it at runtime with
+      # scripts/trigger_incident.sh (POST /admin/chaos), no restart needed.
+      INVENTORY_DEGRADED: "false"
+      INVENTORY_DEGRADED_LATENCY_MS: "2000"
+      INVENTORY_DEGRADED_PROBABILITY: "0.3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/health').status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api-service:
+    build: ./api-service
+    ports:
+      - "8000:8000"
+    environment:
+      INVENTORY_URL: "http://inventory-service:8001"
+      UPSTREAM_TIMEOUT_S: "3.0"
+    depends_on:
+      inventory-service:
+        condition: service_healthy
+
+  # Traffic generator. Kept behind a profile so `docker compose up` starts only
+  # the services; start traffic explicitly when you want it.
+  loadgen:
+    build: ./loadgen
+    environment:
+      TARGET_URL: "http://api-service:8000"
+      RPS: "10"
+    depends_on:
+      - api-service
+    profiles: ["loadgen"]
+    restart: unless-stopped
