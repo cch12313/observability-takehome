@@ -102,4 +102,35 @@ A normal `inventory-service` lookup takes around 15 ms (`INVENTORY_BASE_LATENCY_
 - Local evaluation only. This isn't a production setup.
 - No persistence. Stock values are made up in memory.
 - Nothing comes out except stdout, which is the point.
-# observability-takehome
+## Decisions
+
+### Latency buckets
+
+Buckets (s): `0.06, 0.1, 0.25, 0.5, 1.0, 2.5, 3.5, 6.0` (`common/metrics.py`).
+Each edge is tied to a threshold or to a latency I measured in each mode:
+
+| Edge | Why |
+|---|---|
+| 0.06 | Just above normal p99 (~45–50 ms), so healthy traffic sits in the first bucket. |
+| 0.1 | The SLO: ~2x normal p99, and about where users start to notice delay. The alert counts requests above it, so it must be an exact edge. |
+| 0.25, 0.5, 1.0 | Resolution for mild slowdowns, up to "clearly slow" at 1 s. |
+| 2.5, 3.5 | A ±0.5 s band around the 3 s `UPSTREAM_TIMEOUT_S`. Below 2.5: slow but well clear of the timeout. Inside: near or past it; 504s land at ~3.02 s, just under the 3.5 upper edge. Success vs. timeout inside the band is split by the `status_code` label, so no 3.0 edge. Measured side effect: slow mode (~2.05 s) is also bounded (p99 reads 2.45 s). |
+| 6.0 | Headroom, 2x the timeout: inventory keeps running after api-service gives up. See trade-offs. |
+
+Edges sit just *above* known latencies because `histogram_quantile` interpolates
+inside a bucket, and a p99 lands near the bucket's upper edge.
+
+**How I checked.** Six loadgen containers (one gives only 1–2 req/s under a fault),
+Prometheus p99 over `[1m]` compared with loadgen logs and Tempo span durations.
+My first layout stopped at 0.5 s, so every slow request fell into `+Inf`. A single
+`(2.5, 5]` bucket made api (3.02 s) and inventory (4.02 s) both read ~4.9 s, so I
+couldn't tell which service was slow. Adding 3.5 split them. Final readings:
+slow 2.45 s (real 2.05), timeout api 3.47 s (real 3.02), inventory 5.92 s (real 4.02).
+
+**Trade-offs.**
+- Top edge 6.0 instead of 5.0. Today's fault puts inventory at ~4.02 s, which 5.0 would
+  cover more precisely (~4.95 s vs ~5.92 s). But that delay is just a preset
+  (`LATENCY_MS` can raise it) and a real upstream has no ceiling, so I tied the top
+  edge to the timeout rather than to one observed value.
+- Normal-range p95/p99 read ~57/59 ms whatever the real value, since healthy traffic
+  is all in the first bucket. Fine for alerting, blind to a 20→50 ms regression.
