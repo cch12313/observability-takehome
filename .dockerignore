@@ -1,0 +1,5 @@
+.git
+context/
+.env
+.claude
+**/__pycache__

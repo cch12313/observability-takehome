@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel
+from metrics import setup_metrics
 
 # ---------------------------------------------------------------------------
 # inventory-service
@@ -42,6 +43,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="inventory-service", lifespan=lifespan)
+setup_metrics(app)
 
 
 def _stock_for(sku: str) -> int:
