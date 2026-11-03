@@ -172,6 +172,34 @@ spike, slow, timeout, low traffic, recovery. Setting `for: 1m` or `[5m]` makes t
 
 No Alertmanager: where a page goes is out of scope here.
 
+### Telemetry test
+
+```bash
+./scripts/test_telemetry.sh   # needs the stack running and python3; about 8 s
+```
+
+**What it does.** Sends one `GET /products/sku-1` with a trace id it generated itself, so
+it finds its own trace and not one from loadgen. It polls Tempo for up to 30 s, because
+each service flushes spans separately, then asserts the chain: api SERVER (parent = the id
+it sent) → api CLIENT → inventory SERVER. It also checks that `/metrics` still has the
+`le="0.1"` bucket. The alert needs that edge, and promtool can't notice it going away
+because its series are hard-coded.
+
+**How I checked it fails.** Each run below still returned HTTP 200, so nothing else would
+have gone red:
+- `OTEL_PROPAGATORS=baggage` on inventory: fails, inventory spans are missing from the trace.
+- The same setting on api: fails, the trace is not found.
+
+I first tried `OTEL_PROPAGATORS=none`, but on this SDK version it makes every request
+return 500. That is a visible outage, not the silent break this test is for. In these runs
+the test fails at the polling step. The parent/child assertions only fire when spans share
+a trace but are linked wrongly, and I did not simulate that.
+
+**Not covered.** Other routes and error paths; fault modes; log-to-trace correlation;
+Prometheus and Grafana; whether the alert fires (that is `./scripts/test_alerts.sh`). If
+Tempo or the Collector is down the test fails too, with the same message as a broken
+propagator on api, so a failure means "look here", not "propagation is the cause".
+
 ### Logs
 
 Each stdout line from the two services is one JSON object (`common/logs.py`,
