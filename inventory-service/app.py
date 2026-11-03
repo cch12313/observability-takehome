@@ -18,9 +18,6 @@ from metrics import setup_metrics
 # The service can be put into a degraded state at runtime through
 # POST /admin/chaos. In the degraded state a fraction of lookups take a long
 # time, which is the fault scenario used in this assignment.
-#
-# NOTE: this service intentionally ships WITHOUT metrics or tracing. Adding
-# observability is part of the assignment.
 # ---------------------------------------------------------------------------
 
 BASE_LATENCY_MS = int(os.getenv("INVENTORY_BASE_LATENCY_MS", "15"))

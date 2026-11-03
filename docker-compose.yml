@@ -1,10 +1,6 @@
-# Observability take-home — starter environment.
+# Observability take-home: two services plus Collector, Tempo, Prometheus and Grafana.
 #
-# This starter deliberately contains NO observability stack. Adding metrics,
-# distributed tracing, an OpenTelemetry Collector, a dashboard and an alert is
-# the assignment. You are expected to extend this compose file.
-#
-#   docker compose up --build          # start the two services
+#   docker compose up --build                     # start everything except traffic
 #   docker compose --profile loadgen up loadgen   # start traffic (separate step)
 
 services:
@@ -106,8 +102,8 @@ services:
       - tempo
       - prometheus
 
-  # Traffic generator. Kept behind a profile so `docker compose up` starts only
-  # the services; start traffic explicitly when you want it.
+  # Traffic generator. Kept behind a profile so `docker compose up` starts everything
+  # except traffic; start it explicitly when you want it.
   loadgen:
     build: ./loadgen
     environment:

@@ -13,10 +13,6 @@ from metrics import setup_metrics
 # to get current stock, then returns a combined product view.
 #
 #     GET /products/{sku}  ->  inventory-service GET /stock/{sku}
-#
-# NOTE: this service intentionally ships WITHOUT metrics or tracing. Adding
-# observability, so that a request can be followed across both services, is
-# part of the assignment.
 # ---------------------------------------------------------------------------
 
 INVENTORY_URL = os.getenv("INVENTORY_URL", "http://inventory-service:8001")

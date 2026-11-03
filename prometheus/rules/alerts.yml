@@ -17,7 +17,7 @@ groups:
       # tolerate spikes shorter than ~50s. With [1m] the ratio falls back under 5% about
       # 1 minute after the spike ends, so a spike is tolerated if it is shorter than
       # roughly `for` minus ~40s (~2m20s for a 30% spike at for: 3m) and a sustained
-      # fault pages ~3m after it starts. It also clears ~1 minute after recovery.
+      # fault fired after ~3.6-3.75 min when measured, and cleared 30-45 s after recovery.
       #
       # Min-traffic guard (> 0.5 req/s, same [1m] window): with very few requests one
       # slow call would swing the ratio; both sides of `and` are sum(...) so label sets

@@ -56,7 +56,7 @@ docker compose --profile loadgen up loadgen
 
 A note on the rate, because it affects how you size your observation windows. The generator is single-threaded and sends one request at a time, and `RPS` sets the sleep between requests rather than enforcing a fixed rate. So actual throughput comes out lower than the nominal number, and it drops off sharply once responses get slow, since a slow request holds up the next one. Measured on a reference machine: about 7.7 req/s with no fault running, somewhere between 1 and 2 req/s with one active.
 
-Which means you get far fewer samples during a fault than you do at rest. Percentiles over a short rate window will be noisy. Widen the window, run several generators in parallel, write a concurrent one of your own, or just explain in your README how you dealt with it.
+Which means you get far fewer samples during a fault than you do at rest. Percentiles over a short rate window will be noisy. This repo runs six generators in parallel.
 
 One gotcha when you're shutting down: loadgen has `restart: unless-stopped` and lives in a separate profile, so a plain `docker compose down` leaves it running. It'll come back when Docker restarts and sit there logging errors against services that no longer exist. Use this instead:
 
@@ -81,7 +81,7 @@ Do this while traffic is running:
 ./scripts/resolve_incident.sh           # off
 ```
 
-The two modes produce different symptoms. The assignment asks you to trigger and observe both.
+The two modes produce different symptoms.
 
 Both scripts hit the admin endpoint on inventory-service. You can override the presets with `INVENTORY_ADMIN_URL`, `LATENCY_MS` and `PROBABILITY`.
 
@@ -118,20 +118,22 @@ docker compose --profile loadgen up -d --scale loadgen=6 loadgen
 ```
 
 1. **Something's wrong.** On the dashboard, the bad-request ratio climbs to ~30%. The alert
-   goes pending in under a minute and fires after ~3.75 minutes.
+   goes pending in under a minute and fires after 3.6–3.75 minutes.
 2. **Which service.** In the RED row, 5xx appear only on api-service. Inventory reports 0%
    errors, but its p99 (~5.9 s) is higher than api's (~3.5 s), so inventory is slow, and
    api-service is reporting the result.
-3. **Which part of the call.** Click an exemplar on the p99 panel to open a trace. The api
-   CLIENT span errors at ~3 s, and the inventory SERVER span runs ~4 s and returns 200.
+3. **Which part of the call.** On the p99 panel, click an exemplar dot near 3 s (api-service)
+   or 4 s (inventory) to open a trace; dots near the bottom are healthy requests. The api CLIENT
+   span (named just `GET`) errors at ~3 s, and the inventory SERVER span runs ~4 s and returns 200.
 4. **The log lines.** Copy the trace id:
    ```bash
    docker compose logs api-service inventory-service | grep <trace_id>
    ```
    One line from each service: ERROR 504 at ~3 s, WARNING 200 at ~4 s.
-5. **Turn it off.** `./scripts/resolve_incident.sh`. The alert clears in about 30 s.
+5. **Turn it off.** `./scripts/resolve_incident.sh`. The alert clears in 30–45 s.
 
-Try `slow` too. There are no 5xx, both services are ~2 s, and the alert still fires.
+Try `slow` too. There are no 5xx, spans on both services are ~2 s (the p99 panel reads
+~2.45 s), and the alert still fires.
 
 Checks: `./scripts/test_telemetry.sh` (trace crosses the hop), `./scripts/test_alerts.sh`
 (alert rule, promtool in Docker). Shut down with `docker compose --profile loadgen down -v`.
@@ -179,7 +181,7 @@ slow 2.45 s (real 2.05), timeout api 3.47 s (real 3.02), inventory 5.92 s (real 
 **Choice.** Prometheus scrapes `/metrics` from both services directly, and also
 scrapes the Collector's own metrics on `:8888`. Only traces go through the Collector.
 
-**Why.** §8 stops the Collector. If metrics went through it, the dashboard and the
+**Why.** The outage test stops the Collector. If metrics went through it, the dashboard and the
 alert would go blind at the same moment. Scraping directly keeps them working, and
 `up` and the `otelcol_*` metrics (dashboard, pipeline row) show when the Collector is down.
 
@@ -302,9 +304,9 @@ their `trace_id`s from the request logs and looked up a sample in Tempo, 25 per 
 | After +180 s (restart at +184 s) | 25/25 |
 
 The spans that survived are the newest ones, not the oldest: the SDK's queue dropped old
-spans and sent what it still held on reconnect. It holds only ~15 s at this traffic, partly
-because the ASGI noise spans use the queue too, as they are filtered at the Collector, not
-in the app. Metrics had no gap, because Prometheus scrapes the services directly.
+spans and sent what it still held on reconnect. It holds only ~15 s at this traffic. I read
+that as partly due to the ASGI noise spans, which fill the queue too because they are filtered
+at the Collector, not in the app. Metrics had no gap, because Prometheus scrapes the services directly.
 
 **What told me something was wrong.** The Grafana "OTel Collector up" panel became red and
 `down`. The RED panels did not change, so they looked healthy while traces were being lost.
@@ -343,7 +345,7 @@ I did not build these: the assignment asks for one alert, and extra components c
 
 ## Missing
 
-Known gaps, none hit by the two fault modes:
+Known gaps:
 
 - **Log gaps.** uvicorn's traceback line has no `trace_id`, while the request line has the id
   and no traceback; I'd attach `exc_info` to the request line. A 502's reason isn't logged; I'd
@@ -367,9 +369,10 @@ Known gaps, none hit by the two fault modes:
 Design only. I haven't run a setup like this, so these are starting points, not a tested plan.
 
 - **Collector topology.** Apps send to one gateway Collector per account, and it forwards to the
-  backends over private connectivity, so apps don't need to know where the backends are. I'd skip
-  a separate agent tier until something needs it.
-- **No per-node collector.** Traces and metrics go from the SDK straight to the gateway. Logs go
+  backends over private connectivity, so apps don't need to know where the backends are. No agent
+  tier on the managed platform; agents only run on the Linux boxes.
+- **No per-node collector.** Traces go from the SDK straight to the gateway. Metrics stay scraped
+  inside each account and are forwarded from there, so they survive a gateway outage. Logs go
   from stdout through the platform's log driver to the cloud log service, then get forwarded. If
   the SDK's buffer proves too small (~15 s in my Collector outage test), I'd try a sidecar. I'm
   not sure about the delay and cost of the cloud log path.
