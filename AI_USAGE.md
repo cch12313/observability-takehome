@@ -14,8 +14,8 @@ recommendation. The exceptions are below.
   dashboard JSON.
 - `common/metrics.py` and `common/logs.py`, apart from the bucket edges below.
 - The alert rule and promtool tests, and `scripts/test_telemetry.py`.
-- First drafts of most of the README, `INCIDENT.md` and this file. I changed the root cause,
-  fixes and hotfix in `INCIDENT.md`, and the scaling notes, which I had it cut down to what I'd
+- First drafts of most of the README, `INCIDENT.md` and this file. I pushed back on the root
+  cause wording, and the fixes and hotfix in `INCIDENT.md` are my ideas, and the scaling notes, which I had it cut down to what I'd
   really do. The Metrics path section is my own, revised after a review.
 
 What I decided or wrote myself:

@@ -24,11 +24,13 @@ groups:
       # match (empty).
       # NOTE: removing le="0.1" from the buckets silently disables this alert.
       # 0.1 is SLO_LATENCY_SECONDS in common/telemetry_common.py; keep them in sync.
+      # `or vector(0)`: a series only exists after its first request. If every request has
+      # failed since a restart there is no non-5xx series, and the ratio would be empty, not 100%.
       - alert: ApiServiceBadRequestRatioHigh
         expr: |
           (
             1 - (
-              sum(rate(http_server_request_duration_seconds_bucket{service="api-service", route!="unmatched", le="0.1", status_code!~"5.."}[1m]))
+              (sum(rate(http_server_request_duration_seconds_bucket{service="api-service", route!="unmatched", le="0.1", status_code!~"5.."}[1m])) or vector(0))
               /
               sum(rate(http_server_request_duration_seconds_count{service="api-service", route!="unmatched"}[1m]))
             )

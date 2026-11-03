@@ -158,8 +158,9 @@ Each edge is tied to a threshold or to a latency I measured in each mode:
 | 2.5, 3.5 | A ±0.5 s band around the 3 s `UPSTREAM_TIMEOUT_S`. Below 2.5: slow but well clear of the timeout. Inside: near or past it; 504s land at ~3.02 s, just under the 3.5 upper edge. Success vs. timeout inside the band is split by the `status_code` label, so no 3.0 edge. Measured side effect: slow mode (~2.05 s) is also bounded (p99 reads 2.45 s). |
 | 6.0 | Headroom, 2x the timeout: inventory keeps running after api-service gives up. See trade-offs. |
 
-Edges sit just *above* known latencies because `histogram_quantile` interpolates
-inside a bucket, and a p99 lands near the bucket's upper edge.
+Edges sit above known latencies, with the top edge further out on purpose. `histogram_quantile`
+interpolates inside a bucket, and when about 30% of requests share a bucket, p99 lands near its
+upper edge.
 
 **How I checked.** Six loadgen containers (one gives only 1–2 req/s under a fault),
 Prometheus p99 over `[1m]` compared with loadgen logs and Tempo span durations.
@@ -195,7 +196,7 @@ two configs. Prometheus itself is still a single point of failure; see Missing.
 **Signal.** Share of api-service requests that are 5xx or slower than the 0.1 s SLO
 (404 noise on `route="unmatched"` excluded). Error rate alone misses slow mode, which has no 5xx.
 The ratio is computed from bucket counts (`le="0.1"`), so there is no interpolation.
-p99 is an estimate, and a fast-failing upstream (502 in a few ms) would make it drop.
+p99 is an estimate, and a fast-failing upstream (502 in a few ms) should make it drop.
 
 **Threshold.** Above 5%, with traffic above 0.5 req/s. Normal traffic measured ~0% bad,
 both fault modes ~30%. The traffic guard stops one slow request from swinging the
@@ -208,8 +209,8 @@ ratio drops within a minute after the spike, so a spike shorter than ~2m20s neve
 Measured: sustained slow mode fired after ~3m45s, a 2-minute spike reached pending but
 never fired, and the alert cleared ~45 s after the fault was turned off.
 
-**Tests.** `./scripts/test_alerts.sh` runs promtool on six cases: healthy, 2-minute
-spike, slow, timeout, low traffic, recovery. Setting `for: 1m` or `[5m]` makes the tests fail.
+**Tests.** `./scripts/test_alerts.sh` runs promtool on seven cases: healthy, 2-minute
+spike, slow, timeout, low traffic, recovery, and every request failing since a restart. Setting `for: 1m` or `[5m]` makes the tests fail.
 
 No Alertmanager: where a page goes is out of scope here.
 
@@ -303,15 +304,15 @@ their `trace_id`s from the request logs and looked up a sample in Tempo, 25 per 
 | +165 to +180 s | api 7/25, inventory 15/25, so some traces are only half there |
 | After +180 s (restart at +184 s) | 25/25 |
 
-The spans that survived are the newest ones, not the oldest: the SDK's queue dropped old
-spans and sent what it still held on reconnect. It holds only ~15 s at this traffic. I read
+The spans that survived are the newest ones, not the oldest, so it looks like the SDK's queue
+dropped old spans and sent what it still held on reconnect. That is only ~10–15 s at this traffic. I read
 that as partly due to the ASGI noise spans, which fill the queue too because they are filtered
 at the Collector, not in the app. Metrics had no gap, because Prometheus scrapes the services directly.
 
 **What told me something was wrong.** The Grafana "OTel Collector up" panel became red and
 `down`. The RED panels did not change, so they looked healthy while traces were being lost.
 The logs had a signal too, which I only found when I went through them afterwards: exporter
-ERROR lines and `Queue full, dropping Span` warnings in stdout from ~12 s in. Nothing watches
+ERROR lines from ~12 s in and `Queue full, dropping Span` warnings from ~17 s. Nothing watches
 those.
 
 **Would anything have caught it?** Only someone already looking at that panel. The alert
@@ -339,7 +340,7 @@ I did not build these: the assignment asks for one alert, and extra components c
 - **Classic histograms** give edges with a stated reason, and p99 reads 15–47% high during a
   fault (`INCIDENT.md`). Exact durations come from traces and logs.
 - **The alert favours ignoring spikes over speed.** It takes about 3.6 minutes to fire.
-- **100% trace sampling** makes every log line resolve to a trace, which wouldn't be affordable
+- **100% trace sampling** lets log lines resolve to a trace while the pipeline is up, which wouldn't be affordable
   at higher traffic.
 - **Logs stay on stdout** as the assignment allows, so finding lines by `trace_id` means `grep`.
 
@@ -374,13 +375,13 @@ Design only. I haven't run a setup like this, so these are starting points, not 
 - **No per-node collector.** Traces go from the SDK straight to the gateway. Metrics stay scraped
   inside each account and are forwarded from there, so they survive a gateway outage. Logs go
   from stdout through the platform's log driver to the cloud log service, then get forwarded. If
-  the SDK's buffer proves too small (~15 s in my Collector outage test), I'd try a sidecar. I'm
+  the SDK's buffer proves too small (~10–15 s in my Collector outage test), I'd try a sidecar. I'm
   not sure about the delay and cost of the cloud log path.
 - **Boxes behind the firewall.** An agent on each box pushes outbound over TLS. While offline it
   queues to disk up to a size cap, dropping the oldest. It pulls config and upgrades, starting
   with a few boxes. I'm not sure how to tell an offline box from a dead agent.
-- **Availability versus data loss.** Apps never wait on telemetry: requests carried on untouched
-  when I stopped the Collector. Metrics and alerts matter most, traces can be lossy, and logs from
+- **Availability versus data loss.** Span export never blocked requests when I stopped the
+  Collector (stdout logging can; see Missing). Metrics and alerts matter most, traces can be lossy, and logs from
   the boxes get the disk queue because they may be the only copy.
 - **Cost.** Keep errors and slow requests and sample the rest. Short retention for traces and INFO
   logs. No raw paths or ids as metric labels.

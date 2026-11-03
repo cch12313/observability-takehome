@@ -56,7 +56,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "(1 - (sum(rate(http_server_request_duration_seconds_bucket{service=\"api-service\", route!=\"unmatched\", le=\"0.1\", status_code!~\"5..\"}[1m])) / sum(rate(http_server_request_duration_seconds_count{service=\"api-service\", route!=\"unmatched\"}[1m]))))",
+          "expr": "(1 - ((sum(rate(http_server_request_duration_seconds_bucket{service=\"api-service\", route!=\"unmatched\", le=\"0.1\", status_code!~\"5..\"}[1m])) or vector(0)) / sum(rate(http_server_request_duration_seconds_count{service=\"api-service\", route!=\"unmatched\"}[1m]))))",
           "legendFormat": "bad ratio",
           "refId": "A",
           "range": true,

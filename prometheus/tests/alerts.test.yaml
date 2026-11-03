@@ -244,3 +244,26 @@ tests:
       - eval_time: 25m
         alertname: ApiServiceBadRequestRatioHigh
         exp_alerts: []
+
+  # Every request has failed since a restart: only 502 series exist, so the non-5xx numerator
+  # has no series at all. This must still read as 100% bad.
+  - interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service", method="GET", route="/products/{sku}", status_code="502", le="0.1"}'
+        values: '0+60x120'
+      - series: 'http_server_request_duration_seconds_count{service="api-service", method="GET", route="/products/{sku}", status_code="502"}'
+        values: '0+60x120'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: api-service
+            exp_annotations:
+              summary: "api-service: 100% of requests are slow (>0.1s) or 5xx"
+              description: |
+                Bad-request ratio over the last 1m is 100% (threshold 5% for 3m, traffic > 0.5 req/s).
+                Next: open dashboard "Service overview" (uid service-overview): Row 1 shows user impact, Row 2 shows which
+                service (api vs inventory) has the latency/5xx. Then open traces for slow/5xx requests
+                (p99 exemplars, or Tempo search for api-service with duration > 1s / status error).

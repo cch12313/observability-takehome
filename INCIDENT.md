@@ -16,13 +16,14 @@ Prometheus, `[1m]` window, near the end of each run:
 | | Normal | Slow | Timeout |
 |---|---|---|---|
 | api 5xx ratio | 0% | **0%** | **30.2%** |
-| inventory 5xx ratio | 0% | 0% | 0% |
+| inventory 5xx ratio (request logs: all 200) | 0% | 0% | 0% |
 | api bad ratio (5xx or > 0.1 s) | 0% | 29.8% | 30.2% |
 | api p95 / p99 | 57 / 59 ms | 2.25 / 2.45 s | 3.33 / 3.47 s |
 | inventory p95 / p99 | 57 / 59 ms | 2.25 / 2.45 s | **5.59 / 5.92 s** |
 
 - Error rate alone misses slow mode. In timeout mode it blames the wrong service, as errors
   appear only on api-service. Inventory's higher latency is what points to it.
+- The rate drop on the dashboard comes from loadgen waiting for each response, not from users.
 
 ## What the traces said
 
@@ -43,9 +44,9 @@ line with the same `trace_id` (the last landed just after my log window).
 inventory-service is slow on a fraction of its lookups. api-service is only passing that on.
 
 - Inventory's durations split in two, with nothing between: 1,527 lookups under 38 ms and 620
-  over 2.01 s in slow mode, 1,083 under 48 ms and 440 over 4.01 s in timeout mode. Some requests
+  over 2.01 s in slow mode, 1,083 at 48 ms or less and 440 over 4.01 s in timeout mode. Some requests
   get a fixed extra delay and the rest aren't affected, which doesn't look like general overload.
-- `GET /admin/chaos` confirms it: enabled, `latency_ms` 2000 or 4000, `probability` 0.3.
+- The fault settings on `/admin/chaos` confirm it: `latency_ms` 2000 or 4000, `probability` 0.3.
 
 Both modes are the same fault: 2 s stays under api-service's 3 s timeout, and 4 s goes over it.
 
@@ -53,7 +54,7 @@ Both modes are the same fault: 2 s stays under api-service's 3 s timeout, and 4 
 
 1. Turn the degraded path off: `./scripts/resolve_incident.sh`. The alert cleared 30–35 s later.
 2. If it couldn't be turned off (untested): check the latency distribution before lowering
-   `UPSTREAM_TIMEOUT_S`. Healthy lookups finished under 48 ms, so 1 s cuts off none of them and
+   `UPSTREAM_TIMEOUT_S`. Healthy lookups stayed under about 60 ms in every run, so 1 s cuts off none of them and
    timeout-mode users get the 504 sooner. In slow mode I'd leave it: 2 s successes would become errors.
 3. Otherwise a hotfix, depending on how many requests are slow (untested). **Most slow, and users
    keep refreshing** (ticket sales, say): after 1 s, return a default that reads as "unknown".
@@ -72,8 +73,8 @@ Both modes are the same fault: 2 s stays under api-service's 3 s timeout, and 4 
 
 Yes. Slow: pending +35 s, firing +215 s, cleared 35 s after the fault ended. Timeout: pending
 +45 s, firing +225 s, cleared after 30 s. It fires in slow mode because it counts slow requests as
-well as 5xx, where an error-rate alert would stay silent. It takes about 3.6 minutes to fire, the
-price of ignoring spikes. Burn-rate windows would page sooner.
+well as 5xx, where an error-rate alert would stay silent. It takes 3.6–3.75 minutes to fire, the
+price of ignoring spikes. Burn-rate windows should page sooner.
 
 ## p99 versus the traces
 
