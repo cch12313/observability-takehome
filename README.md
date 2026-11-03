@@ -1,31 +1,41 @@
-# Starter project
+# Observability take-home
 
-Two Python FastAPI services that run locally:
+Two Python FastAPI services, with metrics, traces, trace-correlated logs, a dashboard, an
+alert and a telemetry test:
 
 ```text
 api-service  →  inventory-service
+     │ traces (OTLP)  → OTel Collector → Tempo ┐
+     │ metrics (scrape) ──── Prometheus ───────┼→ Grafana
+     └ JSON logs → stdout
 ```
 
-`api-service` serves product lookups. Every lookup calls `inventory-service` for stock.
-
-There's no metrics, tracing or structured logging in here. That's on purpose, and adding it is the assignment. You'll need to extend this project, `docker-compose.yml` included.
-
-The assignment is in `ASSIGNMENT.md`. Read that first.
+The assignment is in `ASSIGNMENT.md`. The write-ups are `INCIDENT.md` and `AI_USAGE.md`, and
+the Collector outage, trade-offs, what's missing and scaling are further down this file.
 
 ## Requirements
 
-Docker and Docker Compose.
+Docker and Docker Compose. `python3` for the telemetry test.
 
 ## Running it
 
+Credentials come from `.env`, which is gitignored. Nothing secret is in the repo, and Compose
+refuses to start without a Grafana password:
+
 ```bash
+cp .env.example .env   # then set GF_ADMIN_PASSWORD
 docker compose up --build
 ```
 
 Then:
 
-- api-service on <http://localhost:8000> (`GET /products/{sku}`, `GET /health`)
-- inventory-service on <http://localhost:8001> (`GET /stock/{sku}`, `GET /health`)
+| What | Where |
+|---|---|
+| Grafana | <http://localhost:3000>, log in with your `.env` values. Dashboard: "Service overview (api → inventory)" |
+| Traces | Grafana → Explore → Tempo. Query API on <http://localhost:3200> |
+| Alert | <http://localhost:9090/alerts> |
+| api-service | <http://localhost:8000> (`GET /products/{sku}`, `GET /health`) |
+| inventory-service | <http://localhost:8001> (`GET /stock/{sku}`, `GET /health`) |
 
 Quick check:
 
@@ -97,11 +107,40 @@ SKUs run from `sku-1` to `sku-20`.
 
 A normal `inventory-service` lookup takes around 15 ms (`INVENTORY_BASE_LATENCY_MS`).
 
+## Walking the investigation
+
+Someone handed this repo, who doesn't know the fault, can follow this. Six generators give
+enough samples during a fault.
+
+```bash
+docker compose --profile loadgen up -d --scale loadgen=6 loadgen
+./scripts/trigger_incident.sh timeout
+```
+
+1. **Something's wrong.** On the dashboard, the bad-request ratio climbs to ~30%. The alert
+   goes pending in under a minute and fires after ~3.75 minutes.
+2. **Which service.** In the RED row, 5xx appear only on api-service. Inventory reports 0%
+   errors, but its p99 (~5.9 s) is higher than api's (~3.5 s), so inventory is slow, and
+   api-service is reporting the result.
+3. **Which part of the call.** Click an exemplar on the p99 panel to open a trace. The api
+   CLIENT span errors at ~3 s, and the inventory SERVER span runs ~4 s and returns 200.
+4. **The log lines.** Copy the trace id:
+   ```bash
+   docker compose logs api-service inventory-service | grep <trace_id>
+   ```
+   One line from each service: ERROR 504 at ~3 s, WARNING 200 at ~4 s.
+5. **Turn it off.** `./scripts/resolve_incident.sh`. The alert clears in about 30 s.
+
+Try `slow` too. There are no 5xx, both services are ~2 s, and the alert still fires.
+
+Checks: `./scripts/test_telemetry.sh` (trace crosses the hop), `./scripts/test_alerts.sh`
+(alert rule, promtool in Docker). Shut down with `docker compose --profile loadgen down -v`.
+
 ## Known limitations
 
 - Local evaluation only. This isn't a production setup.
 - No persistence. Stock values are made up in memory.
-- Nothing comes out except stdout, which is the point.
+
 ## Decisions
 
 ### Latency buckets
@@ -287,3 +326,93 @@ would have told anyone.
   pages when it stops. Otherwise a dead Prometheus takes every alert down with it.
 
 I did not build these: the assignment asks for one alert, and extra components count against it.
+
+## Trade-offs
+
+- **Zero-code tracing** keeps the SDK and exporters out of the services, and the telemetry test
+  guards it. The cost is less control: the ASGI noise spans can only be dropped at the
+  Collector, so they still fill the app's span queue (see the Collector outage above).
+- **Metrics skip the Collector**, so they survive its outage, at the cost of two paths and
+  two configs.
+- **Classic histograms** give edges with a stated reason, and p99 reads 15–47% high during a
+  fault (`INCIDENT.md`). Exact durations come from traces and logs.
+- **The alert favours ignoring spikes over speed.** It takes about 3.6 minutes to fire.
+- **100% trace sampling** makes every log line resolve to a trace, which wouldn't be affordable
+  at higher traffic.
+- **Logs stay on stdout** as the assignment allows, so finding lines by `trace_id` means `grep`.
+
+## Missing
+
+Known gaps, none hit by the two fault modes:
+
+- **Log gaps.** uvicorn's traceback line has no `trace_id`, while the request line has the id
+  and no traceback; I'd attach `exc_info` to the request line. A 502's reason isn't logged; I'd
+  add a line in the handler. `path` has no length limit.
+- **Stdout can block the service.** Logging writes synchronously. In a probe with nobody reading
+  the pipe, the service hung from about the 207th request, `/health` included. A healthy Docker
+  log driver doesn't hit this, but a central log pipeline could.
+- **The alert goes quiet if api-service dies.** No traffic means no ratio, and the traffic guard
+  fails. It needs an `up`/absence alert and an outside probe. The dashboard has no `up` panel for
+  the services, and no per-route request rate to spot scanner traffic.
+- **Nothing notifies anyone, and Prometheus is a single point of failure.** See "What I'd add" above.
+- **No spans inside inventory**, so a trace can't name the slow step.
+- **The `0.1` threshold lives in several files.** Python shares a constant, but the alert, its
+  tests and the dashboard are synced by hand. Changing bucket edges also creates new series, so
+  queries across the change read wrong for a while.
+- **The telemetry test isn't in CI**, and it needs the running stack.
+- **No burn-rate alert or runbook.**
+
+## If this had to scale
+
+Design only, none of this is built. The platform below is assumed generic, so anything
+platform-specific would need checking first.
+
+**Collector topology**
+- One gateway tier per account: a few Collector replicas behind an internal load balancer. It
+  holds the things that shouldn't be in every app: sampling, filtering, batching, credentials.
+- Apps send to the gateway. Keeping backend details out of the apps means a backend can move
+  without redeploying them.
+- Gateways export to the backend cluster over private connectivity with mTLS, since accounts
+  share no network by default. Each environment gets a resource attribute, so data stays apart.
+- Tail sampling needs all of a trace in one place, so it adds a load-balancing tier routing by
+  `trace_id`. I'd add that only once sampling is really needed.
+
+**No per-node collector**
+- Options: (a) SDK sends OTLP straight to the gateway, (b) a sidecar Collector per task, (c) the
+  platform's log driver sends stdout to the cloud's log service, and a forwarder ships it on.
+- I'd use (a) for traces and metrics, since it adds no containers. For logs, (c), because stdout
+  keeps apps independent of the backend and it still captures crash output.
+- Not sure about: delivery delay and cost of the cloud log path, and whether a sidecar's memory
+  cost is worth it for buffering. §8 measured only ~15 s of SDK buffer at 44 req/s, so if that
+  proves too little, a sidecar is the first thing I'd try.
+
+**Boxes behind the firewall**
+- Nothing can reach in, so they only push: an agent on each box makes outbound TLS connections
+  to a public gateway endpoint, authenticated per box.
+- While offline, the agent queues to disk with a size cap, dropping oldest when it's full so it
+  never fills the box. It resends on reconnect. Offline longer than the cap means a known loss.
+- Agents also pull config and upgrades outbound: from a package repo or an OpAMP server. Roll out
+  in stages to a few boxes first, with the previous version kept for rollback.
+- Each agent sends a heartbeat, so a silent box is noticed. A box that's merely offline and one
+  whose agent died look alike from outside, which is the part I'm least sure how to separate.
+
+**Availability versus data loss**
+- Apps never wait on telemetry. §8 showed requests carrying on untouched through an outage, and
+  I'd keep that: lose telemetry before slowing users.
+- Metrics and alerts come first, since they're how anyone finds out. Traces can be lossy. Logs
+  from the boxes get disk queues, as they may be the only copy.
+- Watch the pipeline from outside it: a dead man's switch plus the alerts from §8.
+
+**Cost**
+- Sampling: keep all errors and slow requests, and a small share of the rest, with the same
+  decision for logs where possible so that `trace_id` links still resolve.
+- Retention: short for traces and INFO logs, longer for metrics, downsampled over time.
+- Cardinality: no raw paths or ids as metric labels (`route` already uses templates), and alert
+  on active series counts per service so that a bad label shows up early.
+
+**Shipping config**
+- One base Collector config and per-environment overlays in Git, reviewed and promoted from
+  lower environments to production. Infrastructure as code for accounts and connectivity.
+- Pin image versions. In CI, validate Collector config and run `promtool test rules`; after each
+  deploy, run the telemetry test against that environment. Secrets come from each account's
+  secret manager.
