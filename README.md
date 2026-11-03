@@ -112,7 +112,7 @@ Each edge is tied to a threshold or to a latency I measured in each mode:
 | Edge | Why |
 |---|---|
 | 0.06 | Just above normal p99 (~45–50 ms), so healthy traffic sits in the first bucket. |
-| 0.1 | The SLO: ~2x normal p99, and about where users start to notice delay. The alert counts requests above it, so it must be an exact edge. |
+| 0.1 | The SLO (`SLO_LATENCY_SECONDS`): ~2x normal p99, and about where users start to notice delay. The alert counts requests above it, so it must be an exact edge. |
 | 0.25, 0.5, 1.0 | Resolution for mild slowdowns, up to "clearly slow" at 1 s. |
 | 2.5, 3.5 | A ±0.5 s band around the 3 s `UPSTREAM_TIMEOUT_S`. Below 2.5: slow but well clear of the timeout. Inside: near or past it; 504s land at ~3.02 s, just under the 3.5 upper edge. Success vs. timeout inside the band is split by the `status_code` label, so no 3.0 edge. Measured side effect: slow mode (~2.05 s) is also bounded (p99 reads 2.45 s). |
 | 6.0 | Headroom, 2x the timeout: inventory keeps running after api-service gives up. See trade-offs. |
@@ -171,3 +171,45 @@ never fired, and the alert cleared ~45 s after the fault was turned off.
 spike, slow, timeout, low traffic, recovery. Setting `for: 1m` or `[5m]` makes the tests fail.
 
 No Alertmanager: where a page goes is out of scope here.
+
+### Logs
+
+Each stdout line from the two services is one JSON object (`common/logs.py`,
+`common/log_config.json`). A crash before logging starts, or a Python warning, still goes
+to stderr as plain text. Lines written while a span is active carry `trace_id` and
+`span_id`. Lines written outside a span have neither: startup, exporter errors, and
+uvicorn's own traceback line.
+
+**One line per request, from a middleware.** `/health` and `/metrics` are skipped, and
+malformed HTTP never reaches the middleware. Fields: `method`, `route`, `path`,
+`status_code`, `duration_ms`. `route` uses the same value as the metric label. I turned
+the uvicorn access log off because it writes nothing when the client has already
+disconnected. In timeout mode those are the inventory lines you need: inventory finishes
+with a 200 after api-service has given up. The access log also has no duration.
+
+**Levels.** ERROR for 5xx, WARNING for slower than the 0.1 s SLO, otherwise INFO. The
+threshold is `SLO_LATENCY_SECONDS` in `common/telemetry_common.py`, shared with the
+histogram buckets. `alerts.yml`, its tests and the dashboard JSON can't import it, so they
+are kept in sync by hand. A status-only rule would leave inventory's late 200s at INFO.
+
+**How I checked.** Six loadgen containers. Timeout mode: a 60 s log window, 40 s of it
+under the fault. All 2,144 lines parsed as JSON, and all 73 api-service 504s had an
+inventory line with the same `trace_id` (200, WARNING, 4.02–4.04 s). Slow mode, 45 s: all
+112 api-service WARNING lines (2.03–2.04 s) joined to an inventory WARNING line, with no
+ERROR lines. In Tempo, 28 of 28 sampled `span_id`s, from normal and faulted requests, were
+that service's SERVER span. It is never the CLIENT span, which has already ended when the
+line is written.
+
+**If these logs went to a central backend** (not built):
+- Collect stdout with a shipper. Stdout keeps the app independent of the backend, as long
+  as the shipper buffers and drops instead of applying back-pressure.
+- Add `environment`, `version` and instance fields. `service` comes from an env var today.
+- Index only low-cardinality fields (`service`, `level`). `trace_id` and `path` stay
+  searchable fields, not index labels.
+- Link `trace_id` to the trace backend, for example with a Grafana derived field.
+- Sampling. Every request is traced today, so a `trace_id` resolves while the pipeline is
+  up and within Tempo's 24 h retention. With sampling,
+  many lines would point at traces that were never kept, so log and trace sampling need to
+  be decided together, and errors and slow requests kept in both.
+- Cost and privacy. One line per request adds up, so INFO may need sampling or short
+  retention, and `path` needs checking for sensitive values.

@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from logs import setup_request_log
 from metrics import setup_metrics
 
 # ---------------------------------------------------------------------------
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="api-service", lifespan=lifespan)
 setup_metrics(app)
+setup_request_log(app)
 
 
 @app.get("/health")

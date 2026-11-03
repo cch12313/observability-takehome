@@ -23,6 +23,7 @@ groups:
       # slow call would swing the ratio; both sides of `and` are sum(...) so label sets
       # match (empty).
       # NOTE: removing le="0.1" from the buckets silently disables this alert.
+      # 0.1 is SLO_LATENCY_SECONDS in common/telemetry_common.py; keep them in sync.
       - alert: ApiServiceBadRequestRatioHigh
         expr: |
           (

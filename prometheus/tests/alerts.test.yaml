@@ -3,6 +3,8 @@
 # Series step = 15s (a [1m] rate then sees 4-5 samples), 121 samples = 30 min; sample
 # index i is at i*15s.  Counters: "start+increment x steps".
 # Traffic is 4 req/s = 60 requests per step; 30% bad => only 42 reach le="0.1".
+# 0.1 is SLO_LATENCY_SECONDS in common/telemetry_common.py; these series are hard-coded,
+# so this file cannot catch that edge being dropped from the real buckets.
 # Evaluation runs every 15s; eval_time just picks the moments we assert on.
 # NOTE: promtool only lists FIRING alerts in exp_alerts, so "exp_alerts: []" means
 # "not firing" (pending is allowed).
