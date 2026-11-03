@@ -1,0 +1,244 @@
+# promtool unit tests for ApiServiceBadRequestRatioHigh (expr uses [1m] rates, for: 3m).
+# Run: scripts/test_alerts.sh
+# Series step = 15s (a [1m] rate then sees 4-5 samples), 121 samples = 30 min; sample
+# index i is at i*15s.  Counters: "start+increment x steps".
+# Traffic is 4 req/s = 60 requests per step; 30% bad => only 42 reach le="0.1".
+# Evaluation runs every 15s; eval_time just picks the moments we assert on.
+# NOTE: promtool only lists FIRING alerts in exp_alerts, so "exp_alerts: []" means
+# "not firing" (pending is allowed).
+rule_files:
+  - ../rules/alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # a) Healthy: 4 req/s, every request fast and 200. Also 1 req/s of slow 404s on
+  #    route="unmatched" - they must be ignored (else ratio would be ~20% and page).
+  - name: healthy traffic does not alert
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service="api-service",method="GET",route="/items/{id}",status_code="200"}'
+        values: '0+60x120'
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service",route="/items/{id}",status_code="200",le="0.1"}'
+        values: '0+60x120'
+      - series: 'http_server_request_duration_seconds_count{service="api-service",route="unmatched",status_code="404"}'
+        values: '0+15x120'
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service",route="unmatched",status_code="404",le="0.1"}'
+        values: '0+0x120'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+
+  # b) 2-minute spike (30% slow, 10m15s-12m00s), then healthy.  With a 1m window the
+  #    ratio is back under 5% about 1 minute after the spike ends, so the alert is
+  #    pending for at most ~2m15s < for: 3m and never fires.  Evaluated every minute
+  #    from before the spike to 5 minutes after it.
+  #    (With a [5m] window the same spike stays above 5% well past for: 2m and DOES fire;
+  #    with for: 1m it fires too; both verified by editing the rule.)
+  - name: 2 minute spike does not alert
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service="api-service",route="/items/{id}",status_code="200"}'
+        values: '0+60x120'
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service",route="/items/{id}",status_code="200",le="0.1"}'
+        values: '0+60x40 2442+42x7 2796+60x72'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 16m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 17m30s
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+
+  # c) Sustained slow mode (30% of requests > 0.1s but still 200, 0 5xx; error-rate
+  #    alerts would miss this).  Fault starts with the sample at 10m15s: the ratio
+  #    exceeds 5% from then on (pending), and must NOT be firing before 3m later.
+  - name: sustained slow mode fires after 3m
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service="api-service",route="/items/{id}",status_code="200"}'
+        values: '0+60x120'
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service",route="/items/{id}",status_code="200",le="0.1"}'
+        values: '0+60x40 2442+42x79'
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 13m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 13m30s
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: api-service
+            exp_annotations:
+              summary: "api-service: 30% of requests are slow (>0.1s) or 5xx"
+              description: |
+                Bad-request ratio over the last 1m is 30% (threshold 5% for 3m, traffic > 0.5 req/s).
+                Next: open dashboard "Service overview" (uid service-overview): Row 1 shows user impact, Row 2 shows which
+                service (api vs inventory) has the latency/5xx. Then open traces for slow/5xx requests
+                (p99 exemplars, or Tempo search for api-service with duration > 1s / status error).
+      - eval_time: 15m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: api-service
+            exp_annotations:
+              summary: "api-service: 30% of requests are slow (>0.1s) or 5xx"
+              description: |
+                Bad-request ratio over the last 1m is 30% (threshold 5% for 3m, traffic > 0.5 req/s).
+                Next: open dashboard "Service overview" (uid service-overview): Row 1 shows user impact, Row 2 shows which
+                service (api vs inventory) has the latency/5xx. Then open traces for slow/5xx requests
+                (p99 exemplars, or Tempo search for api-service with duration > 1s / status error).
+
+  # d) Sustained timeout mode: 70% fast 200s, 30% slow 504s (nothing in le="0.1").
+  - name: sustained timeout mode fires
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service="api-service",route="/items/{id}",status_code="200"}'
+        values: '0+42x120'
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service",route="/items/{id}",status_code="200",le="0.1"}'
+        values: '0+42x120'
+      - series: 'http_server_request_duration_seconds_count{service="api-service",route="/items/{id}",status_code="504"}'
+        values: '0+18x120'
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service",route="/items/{id}",status_code="504",le="0.1"}'
+        values: '0+0x120'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: api-service
+            exp_annotations:
+              summary: "api-service: 30% of requests are slow (>0.1s) or 5xx"
+              description: |
+                Bad-request ratio over the last 1m is 30% (threshold 5% for 3m, traffic > 0.5 req/s).
+                Next: open dashboard "Service overview" (uid service-overview): Row 1 shows user impact, Row 2 shows which
+                service (api vs inventory) has the latency/5xx. Then open traces for slow/5xx requests
+                (p99 exemplars, or Tempo search for api-service with duration > 1s / status error).
+      - eval_time: 10m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: api-service
+            exp_annotations:
+              summary: "api-service: 30% of requests are slow (>0.1s) or 5xx"
+              description: |
+                Bad-request ratio over the last 1m is 30% (threshold 5% for 3m, traffic > 0.5 req/s).
+                Next: open dashboard "Service overview" (uid service-overview): Row 1 shows user impact, Row 2 shows which
+                service (api vs inventory) has the latency/5xx. Then open traces for slow/5xx requests
+                (p99 exemplars, or Tempo search for api-service with duration > 1s / status error).
+
+  # e) Low traffic: 0.2 req/s with 50% bad. Ratio is far above 5% but traffic is
+  #    below the 0.5 req/s guard, so no page.
+  - name: low traffic does not alert
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service="api-service",route="/items/{id}",status_code="200"}'
+        values: '0+3x120'
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service",route="/items/{id}",status_code="200",le="0.1"}'
+        values: '0+1.5x120'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+
+  # f) Recovery: slow fault 10m15s-20m00s (fires at ~13m15s), then healthy.  The ratio
+  #    drops under 5% within a minute of recovery, so the alert is gone by 21m30s.
+  - name: alert clears within ~1-2 minutes of recovery
+    interval: 15s
+    input_series:
+      - series: 'http_server_request_duration_seconds_count{service="api-service",route="/items/{id}",status_code="200"}'
+        values: '0+60x120'
+      - series: 'http_server_request_duration_seconds_bucket{service="api-service",route="/items/{id}",status_code="200",le="0.1"}'
+        values: '0+60x40 2442+42x39 4140+60x39'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: api-service
+            exp_annotations:
+              summary: "api-service: 30% of requests are slow (>0.1s) or 5xx"
+              description: |
+                Bad-request ratio over the last 1m is 30% (threshold 5% for 3m, traffic > 0.5 req/s).
+                Next: open dashboard "Service overview" (uid service-overview): Row 1 shows user impact, Row 2 shows which
+                service (api vs inventory) has the latency/5xx. Then open traces for slow/5xx requests
+                (p99 exemplars, or Tempo search for api-service with duration > 1s / status error).
+      - eval_time: 20m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              service: api-service
+            exp_annotations:
+              summary: "api-service: 30% of requests are slow (>0.1s) or 5xx"
+              description: |
+                Bad-request ratio over the last 1m is 30% (threshold 5% for 3m, traffic > 0.5 req/s).
+                Next: open dashboard "Service overview" (uid service-overview): Row 1 shows user impact, Row 2 shows which
+                service (api vs inventory) has the latency/5xx. Then open traces for slow/5xx requests
+                (p99 exemplars, or Tempo search for api-service with duration > 1s / status error).
+      - eval_time: 21m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 21m30s
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ApiServiceBadRequestRatioHigh
+        exp_alerts: []

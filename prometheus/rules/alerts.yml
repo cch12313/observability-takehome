@@ -1,0 +1,47 @@
+groups:
+  - name: api-service-user-impact
+    rules:
+      # Signal: share of api-service requests that were "bad" for the user,
+      # i.e. a 5xx OR slower than 0.1s.  bad = 1 - good/total, where
+      # good = requests in the le="0.1" bucket whose status is not 5xx.
+      # (Bucket counts, so no quantile interpolation; slow mode has 0% 5xx and
+      # would be invisible to an error-rate-only alert.)
+      # route="unmatched" (404 noise from scanners/typos) is excluded from both sides.
+      #
+      # Threshold: normal traffic measures ~0% bad, both fault modes ~30%, so 5%
+      # sits far from both.
+      #
+      # Window x for: the window decides how long a spike stays visible, `for` decides
+      # how long it must persist. A long window STRETCHES a spike: with [5m] a 1-minute
+      # 30% spike still reads 30%*1/5 = 6% > 5% for ~5 minutes, so `for: 2m` would only
+      # tolerate spikes shorter than ~50s. With [1m] the ratio falls back under 5% about
+      # 1 minute after the spike ends, so a spike is tolerated if it is shorter than
+      # roughly `for` minus ~40s (~2m20s for a 30% spike at for: 3m) and a sustained
+      # fault pages ~3m after it starts. It also clears ~1 minute after recovery.
+      #
+      # Min-traffic guard (> 0.5 req/s, same [1m] window): with very few requests one
+      # slow call would swing the ratio; both sides of `and` are sum(...) so label sets
+      # match (empty).
+      # NOTE: removing le="0.1" from the buckets silently disables this alert.
+      - alert: ApiServiceBadRequestRatioHigh
+        expr: |
+          (
+            1 - (
+              sum(rate(http_server_request_duration_seconds_bucket{service="api-service", route!="unmatched", le="0.1", status_code!~"5.."}[1m]))
+              /
+              sum(rate(http_server_request_duration_seconds_count{service="api-service", route!="unmatched"}[1m]))
+            )
+          ) > 0.05
+          and
+          sum(rate(http_server_request_duration_seconds_count{service="api-service", route!="unmatched"}[1m])) > 0.5
+        for: 3m
+        labels:
+          severity: page
+          service: api-service
+        annotations:
+          summary: "api-service: {{ $value | humanizePercentage }} of requests are slow (>0.1s) or 5xx"
+          description: |
+            Bad-request ratio over the last 1m is {{ $value | humanizePercentage }} (threshold 5% for 3m, traffic > 0.5 req/s).
+            Next: open dashboard "Service overview" (uid service-overview): Row 1 shows user impact, Row 2 shows which
+            service (api vs inventory) has the latency/5xx. Then open traces for slow/5xx requests
+            (p99 exemplars, or Tempo search for api-service with duration > 1s / status error).
