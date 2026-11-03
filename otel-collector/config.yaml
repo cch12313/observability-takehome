@@ -11,6 +11,14 @@ processors:
     check_interval: 1s
     limit_mib: 256
     spike_limit_mib: 64
+  # Drop noise spans from the ASGI instrumentation ("<route> http send" / "http receive").
+  # OTEL_PYTHON_FASTAPI_EXCLUDE_SPANS is not supported in 0.66b2, and we keep zero-code.
+  # Spans matching ANY condition are dropped.
+  filter/drop_asgi_noise:
+    error_mode: ignore
+    traces:
+      span:
+        - 'kind == SPAN_KIND_INTERNAL and (IsMatch(name, ".* http send$") or IsMatch(name, ".* http receive$"))'
   batch: {}
 
 exporters:
@@ -29,7 +37,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, filter/drop_asgi_noise, batch]
       exporters: [otlp_grpc/tempo]
   telemetry:
     metrics:
