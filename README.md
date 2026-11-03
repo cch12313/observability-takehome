@@ -134,3 +134,40 @@ slow 2.45 s (real 2.05), timeout api 3.47 s (real 3.02), inventory 5.92 s (real 
   edge to the timeout rather than to one observed value.
 - Normal-range p95/p99 read ~57/59 ms whatever the real value, since healthy traffic
   is all in the first bucket. Fine for alerting, blind to a 20→50 ms regression.
+
+### Metrics path
+
+**Choice.** Prometheus scrapes `/metrics` from both services directly, and also
+scrapes the Collector's own metrics on `:8888`. Only traces go through the Collector.
+
+**Why.** §8 stops the Collector. If metrics went through it, the dashboard and the
+alert would go blind at the same moment. Scraping directly keeps them working, and
+`up` and the `otelcol_*` metrics (dashboard, pipeline row) show when the Collector is down.
+
+**Trade-off.** Traces and metrics take two paths (OTLP push vs. scrape), so there are
+two configs. Prometheus itself is still a single point of failure; see Missing.
+
+### Alert
+
+`ApiServiceBadRequestRatioHigh` in `prometheus/rules/alerts.yml`.
+
+**Signal.** Share of api-service requests that are 5xx or slower than the 0.1 s SLO
+(404 noise on `route="unmatched"` excluded). Error rate alone misses slow mode, which has no 5xx.
+The ratio is computed from bucket counts (`le="0.1"`), so there is no interpolation.
+p99 is an estimate, and a fast-failing upstream (502 in a few ms) would make it drop.
+
+**Threshold.** Above 5%, with traffic above 0.5 req/s. Normal traffic measured ~0% bad,
+both fault modes ~30%. The traffic guard stops one slow request from swinging the
+ratio when there is almost no traffic.
+
+**Brief spikes.** `[1m]` window, `for: 3m`. I started with `[5m]` and `for: 2m`, but a
+1-minute spike at 30% is still 6% over 5 minutes and stays in the window for 5 minutes,
+so it fired. A longer window stretches a spike instead of hiding it. With `[1m]` the
+ratio drops within a minute after the spike, so a spike shorter than ~2m20s never fires.
+Measured: sustained slow mode fired after ~3m45s, a 2-minute spike reached pending but
+never fired, and the alert cleared ~45 s after the fault was turned off.
+
+**Tests.** `./scripts/test_alerts.sh` runs promtool on six cases: healthy, 2-minute
+spike, slow, timeout, low traffic, recovery. Setting `for: 1m` or `[5m]` makes the tests fail.
+
+No Alertmanager: where a page goes is out of scope here.
