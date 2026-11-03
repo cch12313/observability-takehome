@@ -364,55 +364,22 @@ Known gaps, none hit by the two fault modes:
 
 ## If this had to scale
 
-Design only, none of this is built. The platform below is assumed generic, so anything
-platform-specific would need checking first.
+Design only. I haven't run a setup like this, so these are starting points, not a tested plan.
 
-**Collector topology**
-- One gateway tier per account: a few Collector replicas behind an internal load balancer. It
-  holds the things that shouldn't be in every app: sampling, filtering, batching, credentials.
-- Apps send to the gateway. Keeping backend details out of the apps means a backend can move
-  without redeploying them.
-- Gateways export to the backend cluster over private connectivity with mTLS, since accounts
-  share no network by default. Each environment gets a resource attribute, so data stays apart.
-- Tail sampling needs all of a trace in one place, so it adds a load-balancing tier routing by
-  `trace_id`. I'd add that only once sampling is really needed.
-
-**No per-node collector**
-- Options: (a) SDK sends OTLP straight to the gateway, (b) a sidecar Collector per task, (c) the
-  platform's log driver sends stdout to the cloud's log service, and a forwarder ships it on.
-- I'd use (a) for traces and metrics, since it adds no containers. For logs, (c), because stdout
-  keeps apps independent of the backend and it still captures crash output.
-- Not sure about: delivery delay and cost of the cloud log path, and whether a sidecar's memory
-  cost is worth it for buffering. §8 measured only ~15 s of SDK buffer at 44 req/s, so if that
-  proves too little, a sidecar is the first thing I'd try.
-
-**Boxes behind the firewall**
-- Nothing can reach in, so they only push: an agent on each box makes outbound TLS connections
-  to a public gateway endpoint, authenticated per box.
-- While offline, the agent queues to disk with a size cap, dropping oldest when it's full so it
-  never fills the box. It resends on reconnect. Offline longer than the cap means a known loss.
-- Agents also pull config and upgrades outbound: from a package repo or an OpAMP server. Roll out
-  in stages to a few boxes first, with the previous version kept for rollback.
-- Each agent sends a heartbeat, so a silent box is noticed. A box that's merely offline and one
-  whose agent died look alike from outside, which is the part I'm least sure how to separate.
-
-**Availability versus data loss**
-- Apps never wait on telemetry. §8 showed requests carrying on untouched through an outage, and
-  I'd keep that: lose telemetry before slowing users.
-- Metrics and alerts come first, since they're how anyone finds out. Traces can be lossy. Logs
-  from the boxes get disk queues, as they may be the only copy.
-- Watch the pipeline from outside it: a dead man's switch plus the alerts from §8.
-
-**Cost**
-- Sampling: keep all errors and slow requests, and a small share of the rest, with the same
-  decision for logs where possible so that `trace_id` links still resolve.
-- Retention: short for traces and INFO logs, longer for metrics, downsampled over time.
-- Cardinality: no raw paths or ids as metric labels (`route` already uses templates), and alert
-  on active series counts per service so that a bad label shows up early.
-
-**Shipping config**
-- One base Collector config and per-environment overlays in Git, reviewed and promoted from
-  lower environments to production. Infrastructure as code for accounts and connectivity.
-- Pin image versions. In CI, validate Collector config and run `promtool test rules`; after each
-  deploy, run the telemetry test against that environment. Secrets come from each account's
-  secret manager.
+- **Collector topology.** Apps send to one gateway Collector per account, and it forwards to the
+  backends over private connectivity, so apps don't need to know where the backends are. I'd skip
+  a separate agent tier until something needs it.
+- **No per-node collector.** Traces and metrics go from the SDK straight to the gateway. Logs go
+  from stdout through the platform's log driver to the cloud log service, then get forwarded. If
+  the SDK's buffer proves too small (~15 s in my Collector outage test), I'd try a sidecar. I'm
+  not sure about the delay and cost of the cloud log path.
+- **Boxes behind the firewall.** An agent on each box pushes outbound over TLS. While offline it
+  queues to disk up to a size cap, dropping the oldest. It pulls config and upgrades, starting
+  with a few boxes. I'm not sure how to tell an offline box from a dead agent.
+- **Availability versus data loss.** Apps never wait on telemetry: requests carried on untouched
+  when I stopped the Collector. Metrics and alerts matter most, traces can be lossy, and logs from
+  the boxes get the disk queue because they may be the only copy.
+- **Cost.** Keep errors and slow requests and sample the rest. Short retention for traces and INFO
+  logs. No raw paths or ids as metric labels.
+- **Config.** One base Collector config with per-environment overlays in Git, and pinned versions.
+  Run promtool in CI and the telemetry test after each deploy.
