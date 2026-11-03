@@ -241,3 +241,49 @@ line is written.
   be decided together, and errors and slow requests kept in both.
 - Cost and privacy. One line per request adds up, so INFO may need sampling or short
   retention, and `path` needs checking for sensitive values.
+
+### When the Collector goes down
+
+I ran `docker compose stop otel-collector` for 3 minutes with six loadgen containers
+running (~44 req/s), then started it again. `stop` is a graceful shutdown, so a hard kill
+could lose a little more from the Collector's own buffers.
+
+**The application carried on.** Every request returned 200, before, during and after.
+api-service p99 went from 44 ms to 47 ms, and the rate stayed at ~44 req/s. App memory rose
+from about 57 MiB to 71 MiB during the outage and had dropped to 65 MiB 90 s after recovery.
+
+**The data was lost, and not recovered.** About 8,100 requests ran during the outage. I took
+their `trace_id`s from the request logs and looked up a sample in Tempo, 25 per 15 s:
+
+| Requests sent (relative to the stop) | Found in Tempo |
+|---|---|
+| Before the stop | 25/25 api. Inventory also 25/25, except 23/25 in the last 15 s |
+| 0 to +165 s | 0/25 in every bucket |
+| +165 to +180 s | api 7/25, inventory 15/25, so some traces are only half there |
+| After +180 s (restart at +184 s) | 25/25 |
+
+The spans that survived are the newest ones, not the oldest: the SDK's queue dropped old
+spans and sent what it still held on reconnect. It holds only ~15 s at this traffic, partly
+because the ASGI noise spans use the queue too, as they are filtered at the Collector, not
+in the app. Metrics had no gap, because Prometheus scrapes the services directly.
+
+**What told me something was wrong.** The Grafana "OTel Collector up" panel became red and
+`down`. The RED panels did not change, so they looked healthy while traces were being lost.
+The logs had a signal too, which I only found when I went through them afterwards: exporter
+ERROR lines and `Queue full, dropping Span` warnings in stdout from ~12 s in. Nothing watches
+those.
+
+**Would anything have caught it?** Only someone already looking at that panel. The alert
+never fired, not even as pending, and it shouldn't, because users weren't affected. Nothing
+would have told anyone.
+
+**What I'd add.**
+- An alert on `up{job="otel-collector"} == 0` for a minute or two. That only covers the
+  process being down, so also alert on `otelcol_exporter_send_failed_spans` increasing (the
+  Collector can't reach Tempo) and on accepted spans at zero while the services have traffic
+  (the apps can't reach the Collector).
+- Somewhere for alerts to go. There is no Alertmanager here, so a firing rule notifies nobody.
+- A dead man's switch: an always-firing alert sent to an outside heartbeat service, which
+  pages when it stops. Otherwise a dead Prometheus takes every alert down with it.
+
+I did not build these: the assignment asks for one alert, and extra components count against it.
